@@ -26,6 +26,12 @@ export interface TypechoSettings {
   username: string;
   password: string;
 
+  aiTagsEnabled: boolean;
+  aiTagProvider: "compatible" | "deepseek";
+  aiTagBaseUrl: string;
+  aiTagModel: string;
+  aiTagApiKey: string;
+
   // Field mapping
   fieldMapping: FieldMapping;
   fieldRequired: Record<string, boolean>;
@@ -76,6 +82,12 @@ export const DEFAULT_SETTINGS: TypechoSettings = {
   xmlrpcUrl: "",
   username: "",
   password: "",
+
+  aiTagsEnabled: false,
+  aiTagProvider: "compatible",
+  aiTagBaseUrl: "",
+  aiTagModel: "",
+  aiTagApiKey: "",
 
   fieldMapping: { ...DEFAULT_FIELD_MAPPING },
   fieldRequired: { dateCreated: true },
@@ -155,6 +167,47 @@ export class TypechoSettingTab extends PluginSettingTab {
             this.plugin.settings.password = value;
             await this.plugin.saveSettings();
           });
+      });
+
+    new Setting(containerEl).setName("AI 自动标签").setHeading();
+    new Setting(containerEl)
+      .setName("发布时自动生成标签")
+      .setDesc("仅在标签为空时生成 3～5 个标签。发布前预览全部笔记属性，可手动编辑、重新生成标签或取消；确认后才保存并发布。生成时会将标题及准备发布的正文发送给你配置的模型服务。")
+      .addToggle(toggle => toggle.setValue(this.plugin.settings.aiTagsEnabled).onChange(async value => {
+        this.plugin.settings.aiTagsEnabled = value;
+        await this.plugin.saveSettings();
+      }));
+    new Setting(containerEl).setName("模型服务")
+      .addDropdown(dropdown => dropdown.addOption("compatible", "OpenAI 兼容接口")
+        .addOption("deepseek", "DeepSeek 官方")
+        .setValue(this.plugin.settings.aiTagProvider).onChange(async value => {
+          this.plugin.settings.aiTagProvider = value === "deepseek" ? "deepseek" : "compatible";
+          this.plugin.settings.aiTagBaseUrl = value === "deepseek" ? "https://api.deepseek.com" : "";
+          this.plugin.settings.aiTagModel = value === "deepseek" ? "deepseek-flash" : "";
+          this.plugin.settings.aiTagApiKey = "";
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+    new Setting(containerEl).setName("API 地址")
+      .setDesc("填写服务商提供的 Base URL（例如包含 /v1 的地址），也可填写完整 /chat/completions 地址。切换服务会清空密钥。")
+      .addText(text => text.setValue(this.plugin.settings.aiTagBaseUrl).onChange(async value => {
+        this.plugin.settings.aiTagBaseUrl = value.trim();
+        await this.plugin.saveSettings();
+      }));
+    new Setting(containerEl).setName("模型名称")
+      .setDesc("填写服务商实际支持的模型 ID，可自行修改 DeepSeek 预设。")
+      .addText(text => text.setValue(this.plugin.settings.aiTagModel).onChange(async value => {
+        this.plugin.settings.aiTagModel = value.trim();
+        await this.plugin.saveSettings();
+      }));
+    new Setting(containerEl).setName("API 密钥")
+      .setDesc("仅在本地填写；与原插件连接配置一样保存在库的插件配置文件中，库同步也可能同步此文件。")
+      .addText(text => {
+        text.inputEl.type = "password";
+        text.setValue(this.plugin.settings.aiTagApiKey).onChange(async value => {
+          this.plugin.settings.aiTagApiKey = value.trim();
+          await this.plugin.saveSettings();
+        });
       });
 
     // === Field Mapping ===

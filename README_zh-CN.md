@@ -14,11 +14,24 @@
 - 发布进度弹窗，含成功/失败反馈及文章链接
 - 自动检测 Obsidian 语言，支持简体中文和英文
 
+### 本 Fork 的增强功能
+
+- 每次发布前预览并编辑完整 YAML frontmatter，预览不包含正文
+- 支持 OpenAI 兼容 Chat Completions 接口及 DeepSeek 预设自动生成标签
+- AI 标签生成后可确认、重新生成或手动编辑；重新生成只更新 `tags`
+- 取消预览时不修改笔记，也不请求 Typecho；预览期间笔记发生变化会停止发布，避免覆盖
+- 仅有日期的发布时间会在首次发布时补全为本地当前时间，后续更新保持完整时间
+- 发布成功后记录 `typecho_modified`，并正确支持 `mt_allow_comments: 0`
+
 ## 配置
 
 ### Typecho 连接
 
 填写 Typecho 站点的 XML-RPC 地址、用户名和密码。
+
+### AI 自动标签
+
+启用后填写 OpenAI 兼容的 Chat Completions API 地址、模型名称和 API 密钥；也可选择 DeepSeek 预设。仅当映射的标签属性为空时自动生成。标题和准备发布的正文（不含配置为截断的段落）会发送给所选模型服务。连接信息保存在 Obsidian 本地插件目录的 `data.json` 中，该文件已被仓库忽略，不会上传。
 
 ### Frontmatter 字段映射
 
@@ -74,7 +87,7 @@ slug: my-first-post
 - 在文件管理器中右键 `.md` 文件，选择 `发布到 Typecho`
 - 使用编辑器右键菜单
 
-首次发布时，如果笔记缺少 `typecho_postid`，插件会弹窗确认是否创建新文章。发布成功后自动将 `typecho_postid` 回写到 frontmatter。后续发布即自动更新该文章。
+发布前会打开仅包含完整 YAML frontmatter 的可编辑预览。保留 `typecho_postid` 会更新原文章，删除该属性会新建文章；首次发布成功后会自动回写该字段。关闭或取消预览不会写入笔记，也不会发送发布请求。
 
 发布过程中会显示进度弹窗，展示图片上传状态和最终结果。若配置了双链 URL 模板，弹窗中还会显示文章的可点击链接。
 

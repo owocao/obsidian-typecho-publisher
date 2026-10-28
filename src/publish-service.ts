@@ -1,21 +1,14 @@
-import { App, Modal, Notice, Setting, TFile, Vault } from "obsidian";
+import { App, Modal, Notice, TFile, Vault } from "obsidian";
 import { XmlRpcClient, type PostContent } from "./xmlrpc-client";
 import { createImageUploader } from "./image-uploader";
 import { extractImages, resolveImageFile, replaceImageUrls, convertWikiLinks, stripCutoffSections } from "./markdown-utils";
-import type { FieldMapping, TypechoSettings } from "./settings";
+import type { TypechoSettings } from "./settings";
 import { t } from "./i18n";
+import { generateTags } from "./ai-tags";
+import { PropertiesReviewModal } from "./ai-tags-modal";
+import { splitFrontmatter, readProperties, writeProperties, replaceProperties, validateProperties } from "./frontmatter";
 
 export const FRONTMATTER_POST_ID_KEY = "typecho_postid";
-
-function jsTypeToObsidian(jsType: string): string {
-  switch (jsType) {
-    case "string": return "文本";
-    case "number": return "数字";
-    case "boolean": return "复选框";
-    case "array": return "列表";
-    default: return jsType;
-  }
-}
 
 interface NoticeLine {
   text: string;
@@ -122,29 +115,43 @@ export class PublishService {
       return;
     }
 
-    // Read file content and parse frontmatter from disk (not from cache)
-    const content = await this.vault.read(noteFile);
-    const frontmatter = this.parseFrontmatter(content);
-
-    // Validation: required frontmatter fields
-    const fm = this.fieldMapping;
-    const missingFields: string[] = [];
-    for (const field of Object.keys(settings.fieldRequired) as (keyof FieldMapping)[]) {
-      if (!settings.fieldRequired[field]) continue;
-      const fmKey = fm[field];
-      if (!fmKey) continue;
-      // title and dateCreated have fallbacks, skip required check
-      if (field === "title" || field === "dateCreated") continue;
-      if (!(fmKey in frontmatter)) {
-        const label = t(`f_${field}_label`);
-        missingFields.push(label);
+    try {
+      const original = await this.vault.read(noteFile);
+      const parts = splitFrontmatter(original);
+      let yaml = parts.yaml;
+      const initial = readProperties(yaml);
+      const fm = settings.fieldMapping;
+      const date = initial[fm.dateCreated];
+      if (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        initial[fm.dateCreated] = this.formatDate("YYYY-MM-DDTHH:mm:ss", new Date());
+        yaml = writeProperties(initial);
       }
+      const sections = settings.cutoffSections.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+      const publicBody = stripCutoffSections(parts.body, sections);
+      const generator = settings.aiTagsEnabled && fm.mt_keywords ? (data: Record<string, unknown>) => {
+        const title = this.getFmValue(data, fm.title) || this.extractFirstHeading(parts.body) || noteFile.basename;
+        return generateTags(settings, title, publicBody);
+      } : null;
+      const reviewed = await new PropertiesReviewModal(this.app, yaml, fm.mt_keywords, generator,
+        !!generator && this.getFmList(initial, fm.mt_keywords).filter(tag => tag.trim()).length === 0,
+        data => validateProperties(data, settings)).review();
+      if (reviewed === null) return;
+      const frontmatter = readProperties(reviewed);
+      validateProperties(frontmatter, settings);
+      const content = replaceProperties(original, reviewed);
+      await this.vault.process(noteFile, latest => {
+        if (latest !== original) throw new Error("笔记在预览期间发生了修改，请重新发布以避免覆盖新内容。");
+        return content;
+      });
+      await this.publishReviewed(noteFile, content, frontmatter);
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : "发布失败，请重试。");
     }
-    if (missingFields.length > 0) {
-      new Notice(`${t("missing_required")}${missingFields.join(", ")}`);
-      return;
-    }
+  }
 
+  private async publishReviewed(noteFile: TFile, content: string, frontmatter: Record<string, unknown>): Promise<void> {
+    const settings = this.getSettings();
+    const fm = this.fieldMapping;
     // Validation: require <!--more--> tag
     if (settings.requireMoreTag && !content.includes("<!--more-->")) {
       new Notice(t("more_required"));
@@ -161,28 +168,26 @@ export class PublishService {
       new Notice(t("date_required"));
       return;
     }
-    const pubDate = new Date(dateStr);
+    // A date-only value becomes 08:00 in UTC+8 when parsed as UTC midnight.
+    // Use the publish action's local time once, then persist it for later edits.
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(dateStr);
+    const pubDate = dateOnly ? new Date() : new Date(dateStr);
     if (isNaN(pubDate.getTime())) {
       new Notice(t("date_invalid", { value: dateStr }));
-      return;
-    }
-
-    // Validate property types using metadata cache (has proper JS types)
-    if (!this.validateFieldTypes(noteFile, fm)) {
       return;
     }
 
     // title: frontmatter > first # heading > filename
     const title =
       this.getFmValue(frontmatter, fm.title) ||
-      this.extractFirstHeading(content) ||
+      this.extractFirstHeading(splitFrontmatter(content).body) ||
       noteFile.basename;
 
     // categories: fallback empty
     const categories = this.getFmList(frontmatter, fm.categories);
 
     // mt_keywords: fallback empty
-    const tags = this.getFmList(frontmatter, fm.mt_keywords);
+    const tags = this.getFmList(frontmatter, fm.mt_keywords).filter(tag => tag.trim());
 
     // wp_slug: frontmatter > fallback from dateCreated
     let slug = this.getFmValue(frontmatter, fm.slug);
@@ -204,13 +209,6 @@ export class PublishService {
 
     // Step 0: Check typecho_postid early — before any network I/O
     const existingPostId = frontmatter[FRONTMATTER_POST_ID_KEY] as string | undefined;
-
-    if (!existingPostId) {
-      const confirmed = await this.confirmNewPost();
-      if (!confirmed) {
-        return;
-      }
-    }
 
     // Open progress modal before any network I/O
     const progressModal = new PublishProgressModal(this.app);
@@ -320,7 +318,7 @@ export class PublishService {
       categories: categories.length > 0 ? categories : undefined,
       mt_keywords: tags.length > 0 ? tags.join(",") : undefined,
       slug,
-      mt_allow_comments: parseInt(allowComments, 10) || 1,
+      mt_allow_comments: parseInt(allowComments, 10) === 0 ? 0 : 1,
       mt_excerpt: excerpt,
       post_status: status,
       wp_post_type: postType,
@@ -332,13 +330,14 @@ export class PublishService {
 
     if (existingPostId) {
       await xmlrpc.editPost(existingPostId, postContent, true);
+      await this.savePublishTimes(noteFile, fm.dateCreated, dateOnly ? pubDate : null);
       progressModal.resolve(
         this.buildNotice(existingPostId, title, slug, pubDate, settings.linkUrlTemplate, imgStats, false),
         false
       );
     } else {
       const newPostId = await xmlrpc.newPost(postContent, true);
-      await this.savePostId(noteFile, newPostId);
+      await this.savePublishTimes(noteFile, fm.dateCreated, dateOnly ? pubDate : null, newPostId);
       progressModal.resolve(
         this.buildNotice(newPostId, title, slug, pubDate, settings.linkUrlTemplate, imgStats, true),
         false
@@ -351,86 +350,6 @@ export class PublishService {
       true
     );
   }
-  }
-
-  /**
-   * Validate that each mapped frontmatter field uses the correct Obsidian property type.
-   * Returns true if all fields pass, false if any type mismatch is found.
-   */
-  private validateFieldTypes(
-    noteFile: TFile,
-    fm: FieldMapping
-  ): boolean {
-    const cache = this.metadataCache.getFileCache(noteFile);
-    const cacheFm = cache?.frontmatter;
-    if (!cacheFm) return true;
-
-    const rules: Record<string, { jsTypes: string[]; label: string }> = {
-      dateCreated: { jsTypes: ["string"], label: "日期&时间" },
-      title: { jsTypes: ["string", "array"], label: "文本 / 列表" },
-      categories: { jsTypes: ["array"], label: "列表" },
-      mt_keywords: { jsTypes: ["array"], label: "列表" },
-      slug: { jsTypes: ["string"], label: "文本" },
-      post_type: { jsTypes: ["string"], label: "文本" },
-      mt_allow_comments: { jsTypes: ["number"], label: "数字" },
-      mt_excerpt: { jsTypes: ["string"], label: "文本" },
-      post_status: { jsTypes: ["string"], label: "文本" },
-    };
-
-    for (const [field, rule] of Object.entries(rules)) {
-      const fmKey = fm[field as keyof FieldMapping];
-      if (!fmKey) continue;
-
-      const val = cacheFm[fmKey];
-      if (val === undefined || val === null) continue;
-
-      const jsType = Array.isArray(val) ? "array" : typeof val;
-      if (!rule.jsTypes.includes(jsType)) {
-        new Notice(
-          t("type_error", {
-            field: fmKey,
-            expected: rule.label,
-            actual: jsTypeToObsidian(jsType),
-          })
-        );
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  /** Show a confirm dialog warning about missing typecho_postid. */
-  private confirmNewPost(): Promise<boolean> {
-    return new Promise((resolve) => {
-      const modal = new Modal(this.app);
-      modal.titleEl.setText(t("confirm_new_title"));
-
-      modal.contentEl.createEl("p", {
-        text: t("confirm_new_message"),
-      });
-
-      new Setting(modal.contentEl)
-        .addButton((btn) =>
-          btn
-            .setButtonText(t("confirm_new_confirm"))
-            .setCta()
-            .onClick(() => {
-              modal.close();
-              resolve(true);
-            })
-        )
-        .addButton((btn) =>
-          btn
-            .setButtonText(t("confirm_new_cancel"))
-            .onClick(() => {
-              modal.close();
-              resolve(false);
-            })
-        );
-
-      modal.open();
-    });
   }
 
   private buildNotice(
@@ -504,73 +423,20 @@ export class PublishService {
     return match ? match[1].trim() : null;
   }
 
-  /** Parse frontmatter from actual file content, avoiding stale cache. */
-  private parseFrontmatter(content: string): Record<string, unknown> {
-    if (!/^---\n/.test(content)) return {};
-    const endIdx = content.indexOf("\n---", 4);
-    if (endIdx === -1) return {};
-    const yaml = content.slice(4, endIdx);
-    const result: Record<string, unknown> = {};
-    let currentKey = "";
-
-    for (const line of yaml.split("\n")) {
-      // YAML list item: "  - value" — appends to the current key
-      const listMatch = line.match(/^\s+-\s+(.+)$/);
-      if (listMatch && currentKey) {
-        const item = listMatch[1].trim().replace(/^["']|["']$/g, "");
-        const existing = result[currentKey];
-        if (Array.isArray(existing)) {
-          existing.push(item);
-        } else {
-          result[currentKey] = [item];
-        }
-        continue;
-      }
-
-      const colonIdx = line.indexOf(":");
-      if (colonIdx < 0) continue;
-
-      currentKey = line.slice(0, colonIdx).trim();
-      let value = line.slice(colonIdx + 1).trim();
-
-      // Remove surrounding quotes
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
-      }
-
-      if (value.startsWith("[") && value.endsWith("]")) {
-        // Inline array: [a, b, c]
-        result[currentKey] = value
-          .slice(1, -1)
-          .split(",")
-          .map((s) => s.trim().replace(/^["']|["']$/g, ""));
-      } else if (value !== "") {
-        // Plain scalar value
-        result[currentKey] = value;
-      }
-      // If value is empty, don't set anything yet — might be a YAML list
-    }
-
-    return result;
-  }
-
   private stripFrontmatter(content: string): string {
-    // Remove YAML frontmatter if present
-    if (/^---\n/.test(content)) {
-      const endIdx = content.indexOf("\n---", 4);
-      if (endIdx !== -1) {
-        return content.slice(endIdx + 4).trim();
-      }
-    }
-    return content.trim();
+    return splitFrontmatter(content).body.trim();
   }
 
-  private async savePostId(noteFile: TFile, postId: string): Promise<void> {
+  private async savePublishTimes(
+    noteFile: TFile,
+    dateKey: string,
+    publishedAt: Date | null,
+    postId?: string
+  ): Promise<void> {
     await this.processFrontMatter(noteFile, (fm) => {
-      fm[FRONTMATTER_POST_ID_KEY] = postId;
+      if (postId) fm[FRONTMATTER_POST_ID_KEY] = postId;
+      if (publishedAt) fm[dateKey] = this.formatDate("YYYY-MM-DDTHH:mm:ss", publishedAt);
+      fm.typecho_modified = this.formatDate("YYYY-MM-DDTHH:mm:ss", new Date());
     });
   }
 

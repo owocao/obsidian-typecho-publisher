@@ -16,6 +16,15 @@ Publish Obsidian notes to [Typecho](https://typecho.org) blog via XML-RPC, with 
 - Progress modal with success/error feedback and article URL link
 - Auto-detect Obsidian language, supports English and Simplified Chinese
 
+### Enhancements in this fork
+
+- Review and edit the complete YAML frontmatter before every publish; the article body is never included in the preview
+- Optional AI-generated tags through an OpenAI-compatible Chat Completions endpoint or the DeepSeek preset
+- Review generated tags before publishing, regenerate only `tags`, or cancel without changing the note or calling Typecho
+- Preserve unknown frontmatter properties and block publishing if the note changes while the review window is open
+- Convert date-only publish values to the local publish time once, then retain the full timestamp on later updates
+- Record `typecho_modified` after a successful publish and correctly preserve `mt_allow_comments: 0`
+
 ## Configuration
 
 ### Typecho Connection
@@ -23,6 +32,10 @@ Publish Obsidian notes to [Typecho](https://typecho.org) blog via XML-RPC, with 
 Fill in your Typecho site XML-RPC URL, username, and password.
 
 ![Config Page](https://github.com/user-attachments/assets/e22ce600-2806-4204-a392-4f19e03e16ce)
+
+### AI-generated tags
+
+Enable AI tags and configure an OpenAI-compatible Chat Completions base URL, model ID, and API key. Tags are generated only when the mapped tag property is empty. The title and publishable body (excluding configured cutoff sections) are sent to the selected model service. Credentials remain in Obsidian's local plugin `data.json`, which is excluded from this repository.
 
 
 ### Frontmatter Field Mapping
@@ -82,7 +95,7 @@ The upload path prefix supports date variables: `{YYYY}`, `{YY}`, `{MM}`, `{DD}`
 ![Publish to Typecho Command](https://github.com/user-attachments/assets/b6c42867-eda5-4752-9ef5-57cd75884dab)
 
 
-On first publish, the plugin checks if the note lacks `typecho_postid` and asks for confirmation to create a new post. The `typecho_postid` field is automatically added to the frontmatter after publishing. Subsequent publishes update the existing post.
+Before publishing, the plugin opens an editable preview containing only the complete YAML frontmatter. Keeping `typecho_postid` updates the existing post; removing it creates a new post. The field is automatically added after a successful first publish. Closing or cancelling the preview performs no write and sends no publishing request.
 
 A progress modal shows upload status and the final result, including a clickable link to the published article (if a wiki-link URL template is configured).
 

@@ -46,3 +46,13 @@
   display: block;
   margin: 8px auto 0;
 }
+
+.typecho-properties-editor {
+  width: 100%;
+  min-height: 320px;
+  height: 45vh;
+  resize: vertical;
+  font-family: var(--font-monospace);
+  white-space: pre;
+}
+.typecho-properties-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
